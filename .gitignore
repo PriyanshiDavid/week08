@@ -9,6 +9,13 @@ __pycache__/
 # MacOS
 .DS_Store
 
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/tfplan
+terraform/.terraform.lock.hcl
+
 # Distribution / packaging
 .Python
 build/
