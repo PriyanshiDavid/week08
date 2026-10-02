@@ -73,6 +73,11 @@ jobs:
             | kubectl label --local -f - grafana_dashboard=1 -o yaml \
             | kubectl apply -f -
 
+      # Scrapes each course-service pod and keeps the Rollouts hash label so
+      # the canary analysis can tell canary pods from stable ones
+      - name: Deploy the course-service PodMonitor
+        run: kubectl apply -f kubernetes/progressive/podmonitor.yaml
+
       - name: Show monitoring resources
         run: |
           kubectl get pods -n monitoring

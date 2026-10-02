@@ -8,14 +8,6 @@ resource "helm_release" "ingress_nginx" {
 
   set = [
     {
-      name  = "controller.metrics.enabled"
-      value = "true"
-    },
-    {
-      name  = "controller.metrics.serviceMonitor.enabled"
-      value = "true"
-    },
-    {
       # Health probe path required for the Azure load balancer
       name  = "controller.service.annotations.service\\.beta\\.kubernetes\\.io/azure-load-balancer-health-probe-request-path"
       value = "/healthz"

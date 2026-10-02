@@ -110,20 +110,3 @@ spec:
               service:
                 name: course-service
                 port: {number: 8000}
----
-# Scrape each pod and keep the Rollouts hash label so PromQL can tell the
-# canary ReplicaSet apart from the stable one.
-apiVersion: monitoring.coreos.com/v1
-kind: PodMonitor
-metadata:
-  name: course-service
-  namespace: production
-spec:
-  selector:
-    matchLabels:
-      app: course-service
-  podTargetLabels: [rollouts-pod-template-hash]
-  podMetricsEndpoints:
-    - port: http
-      path: /metrics
-      interval: 10s
