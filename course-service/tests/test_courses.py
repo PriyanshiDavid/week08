@@ -307,3 +307,9 @@ def test_metrics_endpoint_exposes_prometheus_metrics(client):
 
     assert response.status_code == 200
     assert "http_requests_total" in response.text
+
+
+def test_ping_endpoint_needs_no_token(client):
+    response = client.get("/courses/ping")
+
+    assert response.status_code == 200

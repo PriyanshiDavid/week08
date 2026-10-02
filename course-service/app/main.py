@@ -86,6 +86,12 @@ async def inject_faults(request: Request, call_next):
     return await call_next(request)
 
 
+@app.get("/courses/ping", tags=["Health"], include_in_schema=False)
+def ping() -> dict[str, str]:
+    # Unauthenticated endpoint for k6 load tests and canary traffic
+    return {"status": "ok"}
+
+
 # Exposes request count and latency histograms at /metrics for Prometheus
 Instrumentator().instrument(app).expose(app, include_in_schema=False)
 
