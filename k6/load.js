@@ -10,6 +10,6 @@ export const options = {
 };
 
 export default function () {
-  const res = http.get(`${__ENV.BASE_URL}/courses/`);
+  const res = http.get(`${__ENV.BASE_URL}/courses/ping`);
   check(res, { 'status is 200': (r) => r.status === 200 });
 }
