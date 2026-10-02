@@ -1,5 +1,8 @@
 # Week 08 – Continuous Deployment with GitHub Actions and Kubernetes
 
+> **10.3HD feature:** metrics-driven canary releases with automated rollback for `course-service`. See [section 13](#13-progressive-delivery-with-automated-rollback-103hd).
+
+
 In Week 07, we implemented a Continuous Integration (CI) pipeline using GitHub Actions. The pipeline automatically tested the backend services, built Docker images, and pushed the successfully built images to Azure Container Registry (ACR).
 
 In Week 08, we extended this workflow to implement Continuous Delivery: automatic deployment to **staging**, followed by automated smoke tests, with production promoted manually.
@@ -322,3 +325,101 @@ After the production deployment completes:
 - Access the production application.
 - Confirm that the application is working correctly.
 - Verify that production is running the same image SHA that was tested in staging.
+
+
+# 13. Progressive Delivery with Automated Rollback (10.3HD)
+
+`course-service` is released as an **Argo Rollouts canary** on AKS. Traffic moves to a new version in steps (10%, 30%, 60%, 100%). At every step Prometheus is queried for the canary pods' HTTP 5xx ratio and p95 latency. If a threshold is breached three readings in a row, the rollout aborts automatically, traffic returns to the stable version, the GitHub Actions run fails, and a Discord alert is posted. No human is involved.
+
+The other services still use the standard rolling update.
+
+## How it works
+
+```
+merge to main
+  -> 01 CI: Terraform (AKS, ACR, ingress-nginx, Argo Rollouts), tests, build and push images
+  -> 02 deploy to staging -> 03 staging test
+  -> 04 deploy to production: course-service becomes a canary
+        10% -> analysis -> 30% -> analysis -> 60% -> analysis -> 100% (promoted)
+                    \-> analysis fails -> abort, back to stable, Discord alert, job fails
+  -> 05 monitoring: Prometheus, Grafana, PodMonitor, dashboards
+```
+
+| Piece | File |
+| --- | --- |
+| App metrics (`/metrics`), fault injection, `/courses/ping` | `course-service/app/main.py` |
+| Rollout, stable and canary Services, Ingress | `kubernetes/progressive/course-service-rollout.yaml` |
+| Analysis queries and thresholds | `kubernetes/progressive/analysis-template.yaml` |
+| PodMonitor (keeps the `rollouts-pod-template-hash` label) | `kubernetes/progressive/podmonitor.yaml` |
+| ingress-nginx and Argo Rollouts via Terraform's Helm provider | `terraform/progressive_delivery.tf` |
+| Canary wait and Discord alert | `.github/workflows/04-deploy-production.yml` |
+| Faulty-release demo (production canary or staging baseline) | `.github/workflows/06-demo-faulty-release.yml` |
+| Grafana dashboard "Canary Release Analysis" | `kubernetes/monitoring/canary-dashboard.json` |
+| Load generator | `k6/load.js` |
+
+### The analysis gate
+
+Both metrics run every 20 seconds after a 30-second initial delay, filtered to the canary's `rollouts_pod_template_hash`, so canary pods are separated from stable pods even though they run the same image.
+
+| Metric | Query (simplified) | Fails when |
+| --- | --- | --- |
+| `error-ratio` | `5xx request rate / all request rate` | above 0.05 |
+| `p95-latency` | `histogram_quantile(0.95, request duration buckets)` | above 0.5 s |
+
+`failureLimit: 2` means the third bad reading fails the run, so one noisy sample cannot abort a healthy release. The initial delay stops empty early readings counting as passes (the query falls back to `vector(0)` when no data exists).
+
+## Setup
+
+1. Complete sections 1 to 12 first (fork, service principal, variables, secrets, environments).
+2. Create a Discord webhook (channel settings, Integrations, Webhooks) and add its URL as the repository secret `DISCORD_WEBHOOK_URL`.
+3. Merge to `main`. The CI Terraform job creates the cluster and installs ingress-nginx and Argo Rollouts, then the workflows build and deploy everything.
+4. Install the tools for the demo: `k6`, and the Argo Rollouts kubectl plugin ([releases](https://github.com/argoproj/argo-rollouts/releases)).
+
+> The pipeline's service principal only has **Contributor**, so it cannot create role assignments. Images are pulled with an `acr-pull` image pull secret created by the staging and production workflows from the ACR admin credentials, instead of an `AcrPull` role assignment.
+
+## Run the demo
+
+Find the ingress address and start steady load (about 75 requests per second):
+
+```bash
+az aks get-credentials -g <resource-group> -n <cluster> --overwrite-existing
+INGRESS_IP=$(kubectl get svc ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+k6 run -e BASE_URL=http://$INGRESS_IP --duration 15m k6/load.js
+```
+
+Always run load during a release. With no traffic the analysis has nothing to judge.
+
+Watch the rollout and the dashboard in two more terminals:
+
+```bash
+kubectl argo rollouts get rollout course-service -n production --watch
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80   # http://localhost:3000
+```
+
+**Healthy release.** Merge any change to `main`. The canary steps through 10%, 30%, 60% and 100% and is promoted. The first deploy on a new cluster has no previous version, so it goes straight to 100%; canaries show from the second release.
+
+**Faulty release (canary).** Run the manual workflow `06 - Demo Faulty Release` with `target = production`. It builds `course-service` with `FAULT_RATE=0.5` (HTTP 500 on half of `/courses` requests) and releases it. The analysis fails, the rollout shows `Degraded: RolloutAborted`, the job fails and Discord receives the image, failing metric and value.
+
+**Baseline (rolling update).** Run the same workflow with `target = staging`. The plain Deployment accepts the faulty image because its readiness probe passes, the job succeeds, and about half of requests fail until you undo it:
+
+```bash
+kubectl rollout undo deployment/course-service -n staging
+```
+
+## Measured results
+
+| Scenario | Result |
+| --- | --- |
+| Healthy canary | 45,232 requests during the release, all HTTP 200, zero failures |
+| Faulty canary (production) | Aborted after 59 s of exposure; 234 failed requests, about 2.6% of traffic (first run: 75 s, 2.7%) |
+| Same faulty image, rolling update (staging) | Job reported success; 49.9% of requests failed, live until a manual rollback |
+
+## Clean up
+
+The cluster costs Azure credits while it runs. When finished, run the `99 - Infrastructure Teardown` workflow.
+
+## Known limitations
+
+- Only `course-service` uses canaries.
+- ACR admin credentials are less secure than a managed identity; they are used because the lab service principal cannot create role assignments.
+- The frontend reaches `course-service` through the in-cluster Service, so frontend traffic is not split. The canary split applies to traffic through the ingress.
