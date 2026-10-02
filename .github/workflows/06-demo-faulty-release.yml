@@ -27,7 +27,8 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      IMAGE: ${{ vars.ACR_LOGIN_SERVER }}/koalatech-course-service:faulty-${{ github.sha }}
+      # Unique per run: reusing a tag would be a no-op for Argo Rollouts (no new revision, no canary)
+      IMAGE: ${{ vars.ACR_LOGIN_SERVER }}/koalatech-course-service:demo-${{ github.run_id }}-fault${{ inputs.fault_rate }}
 
     steps:
       - name: Checkout repository
