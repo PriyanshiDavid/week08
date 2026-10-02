@@ -1,8 +1,12 @@
 import logging
+import os
+import random
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy.exc import OperationalError
 
 from app.db import Base, engine
@@ -62,6 +66,28 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+# Demo fault injection: a "faulty" image is built with FAULT_RATE > 0 so the
+# canary analysis has a bad release to catch. Production images use 0.
+FAULT_RATE = float(os.getenv("FAULT_RATE", "0"))
+
+
+@app.middleware("http")
+async def inject_faults(request: Request, call_next):
+    if (
+        FAULT_RATE > 0
+        and request.url.path.startswith("/courses")
+        and random.random() < FAULT_RATE
+    ):
+        return JSONResponse(
+            {"detail": "Injected fault"}, status_code=500
+        )
+    return await call_next(request)
+
+
+# Exposes request count and latency histograms at /metrics for Prometheus
+Instrumentator().instrument(app).expose(app, include_in_schema=False)
 
 
 app.include_router(courses.router)

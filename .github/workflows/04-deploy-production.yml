@@ -85,6 +85,12 @@ jobs:
         run: |
           kubectl apply \
             -f kubernetes/production/
+          # course-service is released as an Argo Rollouts canary
+          # The image is substituted before applying, otherwise re-applying the
+          # "placeholder" image would itself trigger a canary release.
+          sed "s|image: placeholder|image: ${{ vars.ACR_LOGIN_SERVER }}/koalatech-course-service:${{ env.IMAGE_TAG }}|" \
+            kubernetes/progressive/course-service-rollout.yaml | kubectl apply -f -
+          kubectl apply -f kubernetes/progressive/analysis-template.yaml
 
       - name: Update frontend image
         run: |
@@ -110,11 +116,12 @@ jobs:
             lecturer-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-lecturer-service:${{ env.IMAGE_TAG }} \
             -n production
 
-      - name: Update course-service image
+      - name: Install Argo Rollouts kubectl plugin
         run: |
-          kubectl set image deployment/course-service \
-            course-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-course-service:${{ env.IMAGE_TAG }} \
-            -n production
+          curl -fsSLo kubectl-argo-rollouts \
+            https://github.com/argoproj/argo-rollouts/releases/download/v1.8.3/kubectl-argo-rollouts-linux-amd64
+          chmod +x kubectl-argo-rollouts
+          sudo mv kubectl-argo-rollouts /usr/local/bin/
 
       - name: Update enrollment-service image
         run: |
@@ -146,11 +153,31 @@ jobs:
             -n production \
             --timeout=300s
 
-      - name: Wait for course-service rollout
+      - name: Install Argo Rollouts kubectl plugin
         run: |
-          kubectl rollout status deployment/course-service \
+          curl -fsSLo kubectl-argo-rollouts \
+            https://github.com/argoproj/argo-rollouts/releases/download/v1.8.3/kubectl-argo-rollouts-linux-amd64
+          chmod +x kubectl-argo-rollouts
+          sudo mv kubectl-argo-rollouts /usr/local/bin/
+
+      # Exits non-zero if analysis fails and the rollout is aborted, which
+      # fails this job. The canary is already back at 0% by then.
+      - name: Wait for course-service canary analysis
+        id: canary
+        run: |
+          kubectl argo rollouts status course-service \
             -n production \
-            --timeout=300s
+            --timeout 600s
+
+      - name: Alert Discord on automatic rollback
+        if: failure() && steps.canary.outcome == 'failure'
+        run: |
+          kubectl argo rollouts get rollout course-service -n production > rollout.txt || true
+          FAILED=$(kubectl get analysisrun -n production --sort-by=.metadata.creationTimestamp \
+            -o jsonpath='{.items[-1:].status.metricResults[?(@.phase=="Failed")].name}')
+          BODY=$(jq -n --arg tag "${{ env.IMAGE_TAG }}" --arg m "$FAILED" --arg run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{content: ("Canary ABORTED and rolled back. Revision: `" + $tag + "`, failing metric: `" + $m + "`. " + $run)}')
+          curl -fsS -H "Content-Type: application/json" -d "$BODY" "${{ secrets.DISCORD_WEBHOOK_URL }}"
 
       - name: Wait for enrollment-service rollout
         run: |
