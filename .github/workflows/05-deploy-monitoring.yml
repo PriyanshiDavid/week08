@@ -73,6 +73,16 @@ jobs:
             | kubectl label --local -f - grafana_dashboard=1 -o yaml \
             | kubectl apply -f -
 
+      - name: Deploy the canary analysis dashboard
+        run: |
+          kubectl create configmap canary-dashboard \
+            --namespace monitoring \
+            --from-file=canary-dashboard.json=kubernetes/monitoring/canary-dashboard.json \
+            --dry-run=client \
+            -o yaml \
+            | kubectl label --local -f - grafana_dashboard=1 -o yaml \
+            | kubectl apply -f -
+
       # Scrapes each course-service pod and keeps the Rollouts hash label so
       # the canary analysis can tell canary pods from stable ones
       - name: Deploy the course-service PodMonitor
