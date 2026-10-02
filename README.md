@@ -396,6 +396,12 @@ kubectl argo rollouts get rollout course-service -n production --watch
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80   # http://localhost:3000
 ```
 
+Log in to Grafana as `admin`. The password is the `GRAFANA_ADMIN_PASSWORD` secret, which the monitoring workflow stores in the cluster:
+
+```bash
+kubectl get secret grafana-admin -n monitoring -o jsonpath='{.data.admin-password}' | base64 --decode; echo
+```
+
 **Healthy release.** Merge any change to `main`. The canary steps through 10%, 30%, 60% and 100% and is promoted. The first deploy on a new cluster has no previous version, so it goes straight to 100%; canaries show from the second release.
 
 **Faulty release (canary).** Run the manual workflow `06 - Demo Faulty Release` with `target = production`. It builds `course-service` with `FAULT_RATE=0.5` (HTTP 500 on half of `/courses` requests) and releases it. The analysis fails, the rollout shows `Degraded: RolloutAborted`, the job fails and Discord receives the image, failing metric and value.
