@@ -11,6 +11,9 @@ spec:
     - name: canary-hash
   metrics:
     - name: error-ratio
+      # Wait for Prometheus to scrape the new pods; an early empty result would
+      # otherwise read as 0 errors (the 'or vector(0)' fallback) and pass
+      initialDelay: 30s
       interval: 20s
       count: 6
       failureLimit: 2
@@ -26,6 +29,9 @@ spec:
               sum(rate(http_requests_total{namespace="production",rollouts_pod_template_hash="{{args.canary-hash}}"}[1m]))
             ) or vector(0)
     - name: p95-latency
+      # Wait for Prometheus to scrape the new pods; an early empty result would
+      # otherwise read as 0 errors (the 'or vector(0)' fallback) and pass
+      initialDelay: 30s
       interval: 20s
       count: 6
       failureLimit: 2
