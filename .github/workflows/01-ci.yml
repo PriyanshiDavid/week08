@@ -5,12 +5,71 @@ on:
   push:
     branches:
       - main
-  
+
+  # Pull requests run the Terraform plan and the tests only
+  pull_request:
+    branches:
+      - main
+
   # Manual trigger for the workflow
   workflow_dispatch:
 
 
 jobs:
+
+  # =========================================================
+  # Infrastructure as Code (Terraform)
+  # Runs first so the ACR and AKS cluster exist before images are pushed.
+  # Pull requests only get a plan, pushes to main also apply it.
+  # =========================================================
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+
+    # Only one run at a time may touch the Terraform state
+    concurrency:
+      group: terraform-state
+      cancel-in-progress: false
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Azure, remote state and Terraform
+        uses: ./.github/actions/terraform-azure
+        with:
+          azure-credentials: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Terraform format check
+        working-directory: terraform
+        run: terraform fmt -check -recursive
+
+      - name: Terraform validate
+        working-directory: terraform
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: terraform
+        run: |
+          terraform plan -input=false -no-color -out=tfplan | tee plan.txt
+          {
+            echo '### Terraform plan'
+            echo '```'
+            tail -n 25 plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Terraform apply
+        if: github.event_name != 'pull_request'
+        working-directory: terraform
+        run: terraform apply -input=false -no-color tfplan
+
+      - name: Show Terraform outputs
+        if: github.event_name != 'pull_request'
+        working-directory: terraform
+        run: terraform output
+
 
   # =========================================================
   # Backend Tests
@@ -109,9 +168,10 @@ jobs:
     name: Build and Push ${{ matrix.image }}
     runs-on: ubuntu-latest
 
-    # All backend tests must pass before this job starts
+    # All backend tests must pass and the infrastructure must be ready
     needs:
       - backend-test
+      - terraform
 
     # Build and push when code is pushed to main or manually triggered
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -159,6 +219,46 @@ jobs:
             --platform linux/amd64 \
             -t ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }} \
             ./${{ matrix.service }}
+
+      # Docker Scout analyses the image that was just built, before it is pushed.
+      - name: Docker Scout - vulnerability report
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: local://${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }}
+          organization: ${{ secrets.DOCKER_HUB_USER }}
+          dockerhub-user: ${{ secrets.DOCKER_HUB_USER }}
+          dockerhub-password: ${{ secrets.DOCKER_HUB_PAT }}
+          only-severities: critical,high
+          only-fixed: true
+          summary: true
+          write-comment: false
+          exit-code: false
+
+      - name: Docker Scout - recommendations
+        uses: docker/scout-action@v1
+        with:
+          command: recommendations
+          image: local://${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }}
+          organization: ${{ secrets.DOCKER_HUB_USER }}
+          dockerhub-user: ${{ secrets.DOCKER_HUB_USER }}
+          dockerhub-password: ${{ secrets.DOCKER_HUB_PAT }}
+          summary: true
+          write-comment: false
+
+      # Security gate: critical vulnerabilities stop the pipeline before the
+      # image is pushed, so a critical image can never reach a deployment.
+      - name: Docker Scout - fail on critical vulnerabilities
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: local://${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }}
+          organization: ${{ secrets.DOCKER_HUB_USER }}
+          dockerhub-user: ${{ secrets.DOCKER_HUB_USER }}
+          dockerhub-password: ${{ secrets.DOCKER_HUB_PAT }}
+          only-severities: critical
+          exit-code: true
+          write-comment: false
 
       - name: Push Docker image with commit SHA
         run: |

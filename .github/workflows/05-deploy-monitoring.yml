@@ -1,0 +1,152 @@
+name: 05 - Deploy Monitoring
+
+on:
+  # Runs after the application has been deployed to production, so the
+  # dashboards always have the running application to show.
+  workflow_run:
+    workflows:
+      - "04 - Deploy to Production"
+    types:
+      - completed
+    branches:
+      - main
+
+  # Manual trigger, for example to redeploy after changing the Helm values
+  workflow_dispatch:
+
+jobs:
+  deploy-monitoring:
+    name: Deploy and validate Prometheus and Grafana
+    runs-on: ubuntu-latest
+
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
+
+      - name: Create monitoring namespace
+        run: |
+          kubectl create namespace monitoring \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+      - name: Create Grafana admin secret
+        run: |
+          kubectl create secret generic grafana-admin \
+            --namespace monitoring \
+            --from-literal=admin-user="admin" \
+            --from-literal=admin-password="${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+      - name: Add the Prometheus community Helm repository
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+
+      # Prometheus, Grafana, kube-state-metrics and node-exporter in one release
+      - name: Install or upgrade kube-prometheus-stack
+        run: |
+          helm upgrade --install kube-prometheus-stack \
+            prometheus-community/kube-prometheus-stack \
+            --version 91.8.2 \
+            --namespace monitoring \
+            --values kubernetes/monitoring/values.yaml \
+            --wait \
+            --timeout 10m
+
+      # Grafana finds this ConfigMap through the grafana_dashboard label
+      - name: Deploy the KoalaTech dashboard
+        run: |
+          kubectl create configmap koalatech-dashboard \
+            --namespace monitoring \
+            --from-file=koalatech-dashboard.json=kubernetes/monitoring/koalatech-dashboard.json \
+            --dry-run=client \
+            -o yaml \
+            | kubectl label --local -f - grafana_dashboard=1 -o yaml \
+            | kubectl apply -f -
+
+      - name: Show monitoring resources
+        run: |
+          kubectl get pods -n monitoring
+          kubectl get servicemonitors -n monitoring
+
+      # ---------------------------------------------------------
+      # Validation
+      # ---------------------------------------------------------
+      - name: Validate Prometheus is collecting metrics
+        run: |
+          PROM="/api/v1/namespaces/monitoring/services/http:kube-prometheus-stack-prometheus:9090/proxy/api/v1/query"
+
+          # Targets need a minute or two after install before they are scraped
+          for _ in {1..20}; do
+            UP=$(kubectl get --raw "$PROM?query=up" \
+              | jq '[.data.result[] | select(.value[1]=="1")] | length')
+            TOTAL=$(kubectl get --raw "$PROM?query=up" | jq '.data.result | length')
+            echo "Targets up: $UP of $TOTAL"
+            if [ "$TOTAL" -gt 0 ] && [ "$UP" -ge 5 ]; then
+              break
+            fi
+            sleep 15
+          done
+
+          if [ "$UP" -lt 5 ]; then
+            echo "Prometheus does not have enough healthy targets."
+            exit 1
+          fi
+
+          # Application metrics: running pods in the production namespace
+          QUERY='sum(kube_pod_status_phase%7Bnamespace%3D%22production%22%2Cphase%3D%22Running%22%7D)'
+          PODS=$(kubectl get --raw "$PROM?query=$QUERY" | jq -r '.data.result[0].value[1]')
+          echo "Running pods in production according to Prometheus: $PODS"
+          test "$PODS" != "null" && test "${PODS%.*}" -ge 1
+
+          {
+            echo '### Prometheus validation'
+            echo "- Healthy scrape targets: $UP of $TOTAL"
+            echo "- Running pods in production: $PODS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate Grafana and the dashboard
+        run: |
+          kubectl port-forward -n monitoring \
+            svc/kube-prometheus-stack-grafana 3000:80 > /dev/null 2>&1 &
+          sleep 10
+
+          curl --fail --silent --retry 10 --retry-delay 5 --retry-connrefused \
+            http://localhost:3000/api/health | jq .
+
+          # Prometheus must be registered as a Grafana data source
+          curl --fail --silent \
+            -u "admin:${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+            http://localhost:3000/api/datasources | jq -r '.[].name'
+
+          # The KoalaTech dashboard must have been picked up
+          FOUND=$(curl --fail --silent \
+            -u "admin:${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+            "http://localhost:3000/api/search?query=KoalaTech" | jq 'length')
+          echo "KoalaTech dashboards found in Grafana: $FOUND"
+          test "$FOUND" -ge 1
+
+          echo "- Grafana healthy, KoalaTech dashboard provisioned" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check the application is still operational
+        run: |
+          kubectl wait --for=condition=Available deployment --all \
+            -n production --timeout=180s
+          kubectl get pods -n production

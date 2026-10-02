@@ -1,0 +1,56 @@
+# Helm values for the kube-prometheus-stack chart (Prometheus, Grafana,
+# kube-state-metrics and node-exporter), tuned for the small AKS cluster.
+
+grafana:
+  # The admin password comes from a Kubernetes secret created by the pipeline,
+  # so no password is stored in this repository.
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  defaultDashboardsTimezone: browser
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+prometheus:
+  prometheusSpec:
+    retention: 24h
+    # Scrape every ServiceMonitor / PodMonitor, not only the ones from this release.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 100m
+        memory: 400Mi
+
+# Not needed for this practical, keeps the footprint small.
+alertmanager:
+  enabled: false
+
+# These control plane components are managed by AKS and cannot be scraped.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi

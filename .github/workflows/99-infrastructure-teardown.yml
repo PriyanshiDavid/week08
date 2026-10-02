@@ -1,0 +1,39 @@
+name: 99 - Infrastructure Teardown
+
+# Manual only. Removes the Azure resources managed by Terraform so the cloud
+# lab does not keep costing credits. The Terraform state storage is kept.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "teardown" to confirm'
+        required: true
+        type: string
+
+jobs:
+  teardown:
+    name: Terraform teardown
+    runs-on: ubuntu-latest
+
+    if: ${{ inputs.confirm == 'teardown' }}
+
+    concurrency:
+      group: terraform-state
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Azure, remote state and Terraform
+        uses: ./.github/actions/terraform-azure
+        with:
+          azure-credentials: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Terraform plan for the teardown
+        working-directory: terraform
+        run: terraform plan -destroy -input=false -no-color -out=tfdestroy
+
+      - name: Terraform teardown
+        working-directory: terraform
+        run: terraform apply -input=false -no-color tfdestroy

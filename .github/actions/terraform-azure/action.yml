@@ -1,0 +1,87 @@
+name: Terraform on Azure
+description: >
+  Logs in to Azure, exposes the service principal to Terraform, makes sure the
+  remote state storage exists and runs terraform init against it.
+
+inputs:
+  azure-credentials:
+    description: Service principal JSON (the AZURE_CREDENTIALS secret)
+    required: true
+  working-directory:
+    description: Folder that holds the Terraform files
+    default: terraform
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_wrapper: false
+
+    - name: Login to Azure
+      uses: azure/login@v2
+      with:
+        creds: ${{ inputs.azure-credentials }}
+
+    - name: Pass the service principal to Terraform
+      shell: bash
+      env:
+        AZURE_CREDENTIALS: ${{ inputs.azure-credentials }}
+      run: |
+        echo "::add-mask::$(echo "$AZURE_CREDENTIALS" | jq -r .clientSecret)"
+        {
+          echo "ARM_CLIENT_ID=$(echo "$AZURE_CREDENTIALS" | jq -r .clientId)"
+          echo "ARM_CLIENT_SECRET=$(echo "$AZURE_CREDENTIALS" | jq -r .clientSecret)"
+          echo "ARM_TENANT_ID=$(echo "$AZURE_CREDENTIALS" | jq -r .tenantId)"
+          echo "ARM_SUBSCRIPTION_ID=$(echo "$AZURE_CREDENTIALS" | jq -r .subscriptionId)"
+        } >> "$GITHUB_ENV"
+
+    # The state lives in its own resource group so that a destroy of the
+    # application infrastructure never deletes the state it is working from.
+    # Every command below is idempotent.
+    - name: Make sure the Terraform state storage exists
+      shell: bash
+      run: |
+        STATE_RG="koalatech-tfstate-rg"
+        STATE_SA="tfstate$(echo "$ARM_SUBSCRIPTION_ID" | tr -d '-' | cut -c1-12)"
+
+        az group create --name "$STATE_RG" --location australiaeast --output none
+        az storage account create \
+          --name "$STATE_SA" \
+          --resource-group "$STATE_RG" \
+          --location australiaeast \
+          --sku Standard_LRS \
+          --min-tls-version TLS1_2 \
+          --allow-blob-public-access false \
+          --output none
+
+        STATE_KEY="$(az storage account keys list \
+          --resource-group "$STATE_RG" \
+          --account-name "$STATE_SA" \
+          --query '[0].value' --output tsv)"
+        echo "::add-mask::$STATE_KEY"
+
+        az storage container create \
+          --name tfstate \
+          --account-name "$STATE_SA" \
+          --account-key "$STATE_KEY" \
+          --output none
+
+        {
+          echo "TFSTATE_RG=$STATE_RG"
+          echo "TFSTATE_SA=$STATE_SA"
+          echo "ARM_ACCESS_KEY=$STATE_KEY"
+        } >> "$GITHUB_ENV"
+
+    - name: Terraform init
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        terraform init \
+          -input=false \
+          -reconfigure \
+          -backend-config="resource_group_name=$TFSTATE_RG" \
+          -backend-config="storage_account_name=$TFSTATE_SA" \
+          -backend-config="container_name=tfstate" \
+          -backend-config="key=week08.tfstate"
