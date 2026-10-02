@@ -1,0 +1,39 @@
+# Runs at every canary step. Three consecutive bad measurements abort the
+# rollout (failureLimit: 2 allows two failures, the third fails the run), so a
+# single noisy sample cannot kill a healthy release.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: course-service-health
+  namespace: production
+spec:
+  args:
+    - name: canary-hash
+  metrics:
+    - name: error-ratio
+      interval: 20s
+      count: 6
+      failureLimit: 2
+      inconclusiveLimit: 2
+      successCondition: result[0] < 0.05
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+          query: |
+            (
+              sum(rate(http_requests_total{namespace="production",status="5xx",rollouts_pod_template_hash="{{args.canary-hash}}"}[1m]))
+              /
+              sum(rate(http_requests_total{namespace="production",rollouts_pod_template_hash="{{args.canary-hash}}"}[1m]))
+            ) or vector(0)
+    - name: p95-latency
+      interval: 20s
+      count: 6
+      failureLimit: 2
+      successCondition: result[0] < 0.5
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+          query: |
+            histogram_quantile(0.95,
+              sum by (le) (rate(http_request_duration_seconds_bucket{namespace="production",rollouts_pod_template_hash="{{args.canary-hash}}"}[1m]))
+            ) or vector(0)

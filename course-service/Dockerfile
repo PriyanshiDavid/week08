@@ -16,6 +16,10 @@ RUN useradd -m appuser \
 
 USER appuser
 
+# Set only for the deliberately faulty demo image
+ARG FAULT_RATE=0
+ENV FAULT_RATE=${FAULT_RATE}
+
 EXPOSE 8000
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
