@@ -1,0 +1,103 @@
+name: 06 - Demo Faulty Release
+
+# Manual only. Builds course-service with fault injection (a share of /courses
+# requests return HTTP 500) and releases it, to demonstrate two outcomes:
+#   production - canary release: the analysis aborts it automatically
+#   staging    - plain Deployment (the old pipeline): all traffic gets the bad
+#                version until someone rolls back by hand
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Where to release the faulty image"
+        required: true
+        default: production
+        type: choice
+        options:
+          - production
+          - staging
+      fault_rate:
+        description: "Share of /courses requests that return HTTP 500 (0 to 1)"
+        required: true
+        default: "0.5"
+
+jobs:
+  faulty-release:
+    name: Release faulty image to ${{ inputs.target }}
+    runs-on: ubuntu-latest
+
+    env:
+      IMAGE: ${{ vars.ACR_LOGIN_SERVER }}/koalatech-course-service:faulty-${{ github.sha }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Build and push the faulty image
+        run: |
+          az acr login --name ${{ vars.ACR_NAME }}
+          docker build \
+            --platform linux/amd64 \
+            --build-arg FAULT_RATE=${{ inputs.fault_rate }} \
+            -t "$IMAGE" \
+            ./course-service
+          docker push "$IMAGE"
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
+
+      - name: Install Argo Rollouts kubectl plugin
+        run: |
+          curl -fsSLo kubectl-argo-rollouts \
+            https://github.com/argoproj/argo-rollouts/releases/download/v1.8.3/kubectl-argo-rollouts-linux-amd64
+          chmod +x kubectl-argo-rollouts
+          sudo mv kubectl-argo-rollouts /usr/local/bin/
+
+      # ---------- Baseline: the original rolling update ----------
+      - name: Release to staging with a plain rolling update
+        if: inputs.target == 'staging'
+        run: |
+          kubectl set image deployment/course-service \
+            course-service="$IMAGE" -n staging
+          # Succeeds: the readiness probe passes, so nothing notices the faults
+          kubectl rollout status deployment/course-service -n staging --timeout=300s
+          echo "Faulty image is serving 100% of staging traffic. Nothing rolled it back."
+
+      # ---------- Progressive delivery: canary with automated rollback ----------
+      - name: Release to production as a canary
+        if: inputs.target == 'production'
+        run: |
+          kubectl argo rollouts set image course-service \
+            course-service="$IMAGE" -n production
+
+      # Exits non-zero when the analysis fails and the rollout aborts
+      - name: Wait for canary analysis
+        id: canary
+        if: inputs.target == 'production'
+        run: |
+          kubectl argo rollouts status course-service -n production --timeout 600s
+
+      - name: Show rollout state
+        if: always() && inputs.target == 'production'
+        run: kubectl argo rollouts get rollout course-service -n production
+
+      - name: Alert Discord on automatic rollback
+        if: failure() && steps.canary.outcome == 'failure'
+        run: |
+          FAILED=$(kubectl get analysisrun -n production --sort-by=.metadata.creationTimestamp \
+            -o jsonpath='{.items[-1:].status.metricResults[?(@.phase=="Failed")].name}')
+          VALUE=$(kubectl get analysisrun -n production --sort-by=.metadata.creationTimestamp \
+            -o jsonpath='{.items[-1:].status.metricResults[?(@.phase=="Failed")].measurements[-1:].value}')
+          BODY=$(jq -n --arg img "$IMAGE" --arg m "$FAILED" --arg v "$VALUE" \
+            --arg run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{content: ("Canary ABORTED and rolled back.\nImage: `" + $img + "`\nFailing metric: `" + $m + "` = `" + $v + "`\n" + $run)}')
+          curl -fsS -H "Content-Type: application/json" -d "$BODY" "${{ secrets.DISCORD_WEBHOOK_URL }}"
