@@ -1,15 +1,11 @@
 name: 05 - Deploy Monitoring
 
 on:
-  # Runs after the application has been deployed to production, so the
-  # dashboards always have the running application to show.
-  workflow_run:
-    workflows:
-      - "04 - Deploy to Production"
-    types:
-      - completed
-    branches:
-      - main
+  # Called by 04 - Deploy to Production once the application is deployed, so
+  # the dashboards always have the running application to show. GitHub does not
+  # allow workflow_run chains deeper than three levels, so this is a called
+  # workflow instead of a fifth workflow in the chain.
+  workflow_call:
 
   # Manual trigger, for example to redeploy after changing the Helm values
   workflow_dispatch:
@@ -18,10 +14,6 @@ jobs:
   deploy-monitoring:
     name: Deploy and validate Prometheus and Grafana
     runs-on: ubuntu-latest
-
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
 
     steps:
       - name: Checkout repository
